@@ -1,6 +1,7 @@
 import pandas as pd
 from utils.clean_data import numerate_df, scale_data, pca_feature_extraction
-from utils.classifier import train_and_evaluate_model, generate_predictions_and_save, analyze_feature_importance
+from utils.classifier import evaluate_model_kfold, generate_predictions_and_save, analyze_feature_importance
+
 
 def preprocess_data(input_csv, output_csv, scaling_method="standard", pca_components=None, pca_variance_threshold=0.95):
     """
@@ -29,28 +30,32 @@ def preprocess_data(input_csv, output_csv, scaling_method="standard", pca_compon
     pca_df.to_csv(output_csv, index=False)
     print("Preprocessing complete and file saved!")
 
+    return pca_df
+
 
 if __name__ == "__main__":
     # Step 1: Preprocess data
-    input_csv = r"C:\Users\libby\study\semesterE\Exchange\BMW hackathon\train.csv"
-    output_csv = r"C:\Users\libby\study\semesterE\Exchange\BMW hackathon\preprocess_train.csv"
+    input_csv = r"train.csv"
+    output_csv = r"preprocess_train.csv"
 
     # Assuming this preprocess function exists in your preprocessing script
     cleaned_df = preprocess_data(input_csv, output_csv, scaling_method="standard", pca_components=None, pca_variance_threshold=0.95)
 
     # Step 2: Split into X (features) and y (target)
-    X_train = cleaned_df.drop(columns=["status"])  # Features (all except 'status')
-    y_train = cleaned_df["status"]  # Target labels (status)
+    X_train = cleaned_df.drop(columns=["status", "physical_part_id"])  # Features (all except 'status')
+    y_train = cleaned_df["status"].map({"OK": 1, "NOK": 0})
 
     # Now you have X_train and y_train ready for model training
 
     # Step 3: Call functions from predict.py
 
     # Call the training and evaluation function
-    model = train_and_evaluate_model(X_train, y_train)
+    model = evaluate_model_kfold(X_train, y_train)
 
     # If you have test data and want to generate predictions:
     test_data = pd.read_csv("test.csv")  # Load your test data
+    test_data = preprocess_data(test_data, output_csv="preprocessed_test.csv", scaling_method="standard", pca_components=None, pca_variance_threshold=0.95)
+
     generate_predictions_and_save(model, test_data, "test.csv")
 
     # Analyze feature importance
