@@ -83,6 +83,24 @@ def scale_data(df, method="standard"):
     return df
 
 
+def filter_features(df, threshold=0.5):
+    """_summary_
+    Filter out columns that have many missing values.
+    
+    Parameters:
+    - df: pandas DataFrame containing scaled sensor data.
+    - variance_threshold: float, precentage of missing values the df can handle.
+    
+    Returns:
+    - df - the df where all columns have at least 50% non-missing values.
+    """
+    columns_to_drop = []
+    for col in df.columns:
+        if df[col].isnull().sum() / len(df) >= threshold:
+            columns_to_drop.append(col)
+    filtered_df = df.drop(columns=columns_to_drop)
+    return filtered_df
+
 def pca_feature_extraction(df, n_components=None, variance_threshold=0.95):
     """_summary_
     Apply PCA to reduce dimensionality of the dataset.
