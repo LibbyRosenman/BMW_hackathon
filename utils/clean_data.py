@@ -1,6 +1,7 @@
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
 import pandas as pd
+from utils.add_weather_to_train import add_weather_to_train
 
 """_summary_ 
     this module cleans and preprocess the data according to the following worf-flow:
@@ -30,30 +31,29 @@ def numerate_df(df):
     # Convert 'physical_part_type' to numeric
     part_type_map = {'type1': 1, 'type2': 2}
     df['physical_part_type'] = df['physical_part_type'].map(part_type_map)
+    df["status"] = df["status"].map({"OK": 1, "NOK": 0})
     return df
 
 
-def scale_data(df, method="standard"):
+def scale_data(df, method):
     """_summary_
     scale the data according to the method given as input (min-max or standarization).
     
     Args:
         df: the dataset, pandas dataframe.
-        method: string represents the chosen scaling method. Defaults to "standard".
+        method: string represents the chosen scaling method.
         
     Returns:
         df: the scaled pandas dataframe.
     """
     # Fill missing values with the mean for sensor columns
-    exclude_columns = ['physical_part_id', 'status']
-    required_columns = [col for col in df.columns if col not in exclude_columns]
+    categoral_columns = ['physical_part_id', 'message_timestamp', 'status', 'physical_part_type', 'weekday', 'shift']
+    required_columns = [col for col in df.columns if col not in categoral_columns]
     df[required_columns] = df[required_columns].fillna(df[required_columns].mean())
-    if method == "min-max":
+    if method == 2:
         scaler = MinMaxScaler()
-    elif method == "standard":
+    elif method == 1:
         scaler = StandardScaler()
-    else:
-        raise ValueError("Invalid scaling method. Choose 'min-max' or 'standard'.")
     # Scale columns
     df[required_columns] = scaler.fit_transform(df[required_columns])
     return df
@@ -93,12 +93,13 @@ def analyze_features(df, low_variance_threshold=0.01, high_correlation_threshold
     """
     removed_features = {"low_variance": [], "high_correlation": []}
     # Step 1: Remove low-variance features
-    variance = df.var()
+    exclude_columns = ["physical_part_type", "status", "shift", "physical_part_id", "weekday"]
+    variance = df.drop(columns=exclude_columns).var()
     low_variance_features = variance[variance < low_variance_threshold].index.tolist()
     df = df.drop(columns=low_variance_features)
     removed_features["low_variance"] = low_variance_features
     # Step 2: Remove highly correlated features
-    correlation_matrix = df.corr()
+    correlation_matrix = df.drop(columns=exclude_columns).corr()
     correlated_pairs = set()
     for i in range(len(correlation_matrix.columns)):
         for j in range(i + 1, len(correlation_matrix.columns)):
@@ -143,6 +144,8 @@ def add_features(df):
     columns = list(df.columns)
     columns.insert(4, columns.pop(columns.index('time_in_shift')))
     df = df[columns]
+    # Create "temp" and "humidity" columns
+    df = add_weather_to_train(df, "filtered_weather_data.csv")
     # Drop columns that should be excluded
     exclude_columns = ['message_timestamp', 'shift_start']
     df = df.drop(columns=exclude_columns)
@@ -163,10 +166,10 @@ def pca_feature_extraction(df, n_components=None, variance_threshold=0.95):
       - pca_df: DataFrame of principal components.
       - pca: Trained PCA model.
     """
-    exclude_columns = ['physical_part_id', 'status']
+    exclude_columns = ['physical_part_id', 'status', 'physical_part_type']
     columns_to_filter = [col for col in df.columns if col not in exclude_columns]
     # Verify there are no missing values
-    assert df.isnull().sum().sum() == 0, "There are still NaN values in the DataFrame after preprocessing!"
+    assert df[columns_to_filter].isnull().sum().sum() == 0, "There are still NaN values in the DataFrame after preprocessing!"
     # apply PCA
     pca = PCA(n_components=n_components)
     principal_components = pca.fit_transform(df[columns_to_filter])
@@ -177,9 +180,8 @@ def pca_feature_extraction(df, n_components=None, variance_threshold=0.95):
         # Re-run PCA with selected components
         pca = PCA(n_components=n_components)
         principal_components = pca.fit_transform(df[columns_to_filter])
-    # Create a DataFrame for the principal components using original feature names
-    pc_columns = [f"PC_{columns_to_filter[abs(pca.components_[i]).argmax()]}"
-    for i in range(len(pca.components_))]
+    # Create a DataFrame for the principal components with column names PC_1, PC_2, ..., PC_n
+    pc_columns = [f"PC_{i+1}" for i in range(len(pca.components_))]
     pca_df = pd.DataFrame(principal_components, columns=pc_columns, index=df.index)
     # Add excluded columns back to the DataFrame
     for col in exclude_columns:
@@ -206,7 +208,9 @@ def preprocess_data(input_csv, output_csv, filter_method, scaling_method, pca_co
     print("Filtering columns withmore than 50% missing values.")
     df = filter_features(df)
     print("Scaling dataset.")
-    df = scale_data(df, method=scaling_method)     
+    df = scale_data(df, method=scaling_method)
+    pca_model = None
+    original_features = df.columns     
     if filter_method == 1:
         print("baseline - no added features.")
         # Drop columns that should be excluded
@@ -215,12 +219,15 @@ def preprocess_data(input_csv, output_csv, filter_method, scaling_method, pca_co
     elif filter_method == 2:
         print("remove features with low beneficial value. \n \
             Add features - temp, humidity, time in shift.")
-        df = analyze_features(df)
         df = add_features(df)
+        df = scale_data(df, method=scaling_method)
+        df, removed_features = analyze_features(df)
     elif filter_method == 3:
         print("Applying PCA.")
+        exclude_columns = ['message_timestamp']
+        df = df.drop(columns=exclude_columns)
         df, pca_model = pca_feature_extraction(df, n_components=pca_components, variance_threshold=pca_variance_threshold)
     print(f"Saving preprocessed data to {output_csv}.")
     df.to_csv(output_csv, index=False)
     print("Preprocessing complete and file saved!")
-    return df
+    return df, pca_model, original_features

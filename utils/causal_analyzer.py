@@ -2,18 +2,14 @@ import pandas as pd
 import numpy as np
 import shap
 from dowhy import CausalModel
-from causalnex.structure import StructureModel
-from causalnex.plots import plot_structure, NODE_STYLE, EDGE_STYLE
 import matplotlib.pyplot as plt
-from dowhy import CausalModel
 import networkx as nx
-import matplotlib.pyplot as plt
 
 """_summary_
     This module performs a causal inferance on the data. The process includes:
     1. displays the results from the models
-    2. Feature importance & SHAP analysis
-    3.Compare different models
+    2. Feature importance & PCA analysis
+    3. Compare different preprocessing methods
     4. Causal inferance:
     4.a. Model the problem - create a DAG.
     4.b. identify estimand - number of NOK parts.
@@ -44,7 +40,7 @@ def visualize_results(results):
     plt.xticks(rotation=45)
     plt.grid(axis='y')
     plt.tight_layout()
-    plt.show()
+    plt.show(block=True)
 
 
 def feature_importance_analysis(model, X_train, top_n_features=10):
@@ -81,7 +77,6 @@ def shap_analysis(model, X_train, top_n_features=10):
     Returns:
         dict: Mean SHAP values for the top features.
     """
-    import shap
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_train)
     # Mean absolute SHAP values for each feature
@@ -96,28 +91,70 @@ def shap_analysis(model, X_train, top_n_features=10):
     return shap_dict
 
 
-def run_analysis(random_forest_model, X_train):
+def find_original_features(pca, feature_names, pc_index, top_n=5):
     """
-    Performs feature importance and SHAP analysis on the trained model and dataset.
+    Find the original features contributing to a given principal component.
+
+    Args:
+        pca: Trained PCA object (from sklearn.decomposition.PCA).
+        feature_names: List of original feature names.
+        pc_index: Index of the principal component to analyze.
+        top_n: Number of top contributing features to return (default: 10).
+
+    Returns:
+        A sorted DataFrame of features and their contributions to the given PC.
+    """
+    if not hasattr(pca, "components_"):
+        raise ValueError("The provided PCA object does not have components_. Make sure it's trained.")
+    if pc_index < 0 or pc_index >= pca.components_.shape[0]:
+        raise ValueError(f"Invalid pc_index. Must be between 0 and {pca.components_.shape[0] - 1}.")
+    # Get the loading vector for the selected principal component
+    loading_vector = pca.components_[pc_index]
+    # Pair feature names with their corresponding loadings
+    exclude_columns = ['physical_part_id', 'status', 'physical_part_type', 'message_timestamp']
+    feature_names = [feature for feature in feature_names if feature not in exclude_columns]
+    feature_contributions = pd.DataFrame({
+        "Feature": feature_names,
+        "Contribution": loading_vector
+    })
+    # Sort by absolute contribution
+    feature_contributions["Absolute_Contribution"] = feature_contributions["Contribution"].abs()
+    feature_contributions = feature_contributions.sort_values(by="Absolute_Contribution", ascending=False)
+    # Return the top_n features
+    return feature_contributions.head(top_n)
+
+
+def run_analysis(random_forest_model, X_train, is_pca, pca_model=None, original_features=None):
+    """
+    Performs feature importance, SHAP analysis and PCA feature retreival on the trained model and dataset.
     
     Args:
         random_forest_model: Trained random forest model.
         X_train: Training dataset (pd.DataFrame).
         top_n_features: Number of top features to consider for insights.
+        is_pca: True if the filtering method is pca.
+        pca_model: relevant if is_pca = True.
+        original_features: relevant if is_pca = True.
         
     Returns:
-        dict: Consolidated insights with top features from importance and SHAP analysis.
+        dict: Consolidated insights with top features from importance and PCA analysis.
     """
     print("Starting feature Analysis...")
     # Feature Importance
     feature_importance = feature_importance_analysis(random_forest_model, X_train)
     # SHAP Analysis
-    shap_values = shap_analysis(random_forest_model, X_train)
+    # shap_values = shap_analysis(random_forest_model, X_train)
+    # If PCA - retrieve the original features
+    if is_pca:
+        original_important_features = {}
+        for pc in feature_importance:
+            original_important_features += find_original_features(pca_model, original_features, int(pc.split('_')[1]))
+        feature_importance = original_important_features
     print("All Feature Analysis Metrics Completed.")
-    return [feature_importance, shap_values]
+    return feature_importance
     
 
-def find_best_model(results, weights=(0.5, 0.3, 0.2)):
+def find_best_method(results, weights=(0.5, 0.3, 0.2)):
     """
     Selects the best model based on a weighted combined score.
     
@@ -144,52 +181,54 @@ def find_best_model(results, weights=(0.5, 0.3, 0.2)):
     return best_model
 
 
-def create_dag(features, confounders):
-    """_summary_
-    this function creates a DAG for the causal model.
-    effect = status
+def create_dag(data, features, confounders):
+    """
+    This function creates a DAG for the causal model using DoWhy.
+    The effect is 'status'.
     
     Args:
-        features: a list of column names of the most important features.
-        confounders: a dictionary: 
-                keys are features who might affect other features or the affect.
-                values are lists of the important features who are affected by a specific key. 
+        X: the dataset.
+        features: A list of column names representing the most important features.
+        confounders: A dictionary:
+            - Keys are features that might affect other features or the effect.
+            - Values are lists of important features affected by the specific key.
     
     Returns:
-    - DAG: the directed graph.
+        - model: A DoWhy causal model object.
     """
-    dag = StructureModel()
-    nodes = ["status"] + features +  confounders
-    dag.add_nodes_from(nodes)
-    for cause in features:
-        dag.add_edge(cause, "status")
-    for confounder in confounders.keys():
-        for effect in confounders.get(confounder):
-            dag.add_edge(confounder, effect)
-    # Visualize the DAG
-    viz = plot_structure(dag, graph_attributes={"scale": "1.5"})
-    viz.view()
-    return dag
-    
+    dag = nx.DiGraph()
+    # Add edges from features to outcome
+    for feature in features:
+        dag.add_edge(feature, "status")
+    # Add edges for confounders
+    for confounder, affected_features in confounders.items():
+        for feature in affected_features:
+            dag.add_edge(confounder, feature)
+    # Convert NetworkX graph to DOT string
+    graph_str = nx.nx_pydot.to_pydot(dag).to_string()
+    return graph_str
 
-def single_feature_causal_inferance(dag, feature, outcome="status", method="backdoor.linear_regression"):
+
+def single_feature_causal_inferance(data, dag, feature, outcome="status", method="backdoor.linear_regression"):
     """
     Analyze the causal effect of a single feature on the outcome.
 
     Args:
-        dag: The causal DAG created with causalnex.
+        data: The dataset (Pandas DataFrame).
+        dag: The causal DAG created with DoWhy.
         feature: The feature to analyze.
         outcome: The outcome variable (default is "status").
+        method: The estimation method (default is backdoor.linear_regression).
 
     Returns:
         A dictionary containing the feature, effect size, and textual explanation.
     """
     # Build causal model
     causal_model = CausalModel(
-        data=None,  # Provide the data used for the DAG
+        data=data,
         treatment=feature,
         outcome=outcome,
-        graph=dag.to_dot()
+        graph=dag
     )
     # Identify estimand
     estimand = causal_model.identify_effect()
@@ -225,12 +264,13 @@ def multiple_feature_causal_inferance(dag, features, outcome="status"):
     return results
 
 
-def comprehensive_causal_inferance(dag, features, k=3, outcome="status"):
+def comprehensive_causal_inferance(data, dag, features, k=3, outcome="status"):
     """
     Perform comprehensive causal analysis.
 
     Args:
-        dag: The causal DAG created with causalnex.
+        data: The dataset (Pandas DataFrame).
+        dag: The causal DAG.
         features: A list of features to analyze.
         k: The number of top features to include in the multiple feature analysis.
         outcome: The outcome variable (default is "status").
@@ -239,52 +279,26 @@ def comprehensive_causal_inferance(dag, features, k=3, outcome="status"):
         A dictionary containing results of single and multiple feature analyses and textual summaries.
     """
     # Perform single feature analysis
-    single_results = []
-    for feature in features:
-        result = single_feature_causal_inferance(dag, feature, outcome)
-        single_results.append(result)
+    single_results = [
+        single_feature_causal_inferance(data, dag, feature, outcome) for feature in features
+    ]
     # Rank features by effect size (absolute value)
     single_results_sorted = sorted(single_results, key=lambda x: abs(x["effect"]), reverse=True)
     # Select top-k features for multiple feature analysis
     top_features = [result["feature"] for result in single_results_sorted[:k]]
     # Perform multiple feature analysis on top-k features
-    multiple_results = multiple_feature_causal_inferance(dag, top_features, outcome)
+    # multiple_results = multiple_feature_causal_inferance(data, dag, top_features, outcome)
     # Textual explanation
     summary = (
         f"Top {k} features with the largest effects:\n" +
         "\n".join(
             [f"Feature '{res['feature']}' with effect size {res['effect']:.4f}." for res in single_results_sorted[:k]]
-        ) +
-        "\n\nCombined Analysis of Top Features:\n" +
-        "\n".join([res["explanation"] for res in multiple_results])
+        ) 
+        # "\n\nCombined Analysis of Top Features:\n" +
+        # "\n".join([res["explanation"] for res in multiple_results])
     )
     return {
         "single_results": single_results,
-        "multiple_results": multiple_results,
+        # "multiple_results": multiple_results,
         "summary": summary,
     }
-
-
-def visualize_dag(dag, features, outcome="status", highlight_color="red", title="Causal Graph"):
-    """
-    Visualize the causal DAG highlighting the specified features.
-
-    Args:
-        dag: The causal DAG created with causalnex.
-        features: A list of features whose causal links to the outcome should be highlighted.
-        outcome: The outcome variable (default is "status").
-        highlight_color: Color for highlighting causal links (default is "red").
-        title: Title of the visualization graph.
-    """
-    # Generate positions for nodes
-    pos = nx.spring_layout(dag)
-    # Create the plot
-    plt.figure(figsize=(12, 10))
-    nx.draw_networkx_nodes(dag, pos, node_color="lightblue", node_size=5000)
-    # Highlight edges for the specified features
-    nx.draw_networkx_edges(dag, pos, edgelist=[(feature, outcome) for feature in features], edge_color=highlight_color, width=2)
-    # Draw all other edges with low opacity
-    nx.draw_networkx_edges(dag, pos, edgelist=[e for e in dag.edges if e[1] != outcome or e[0] not in features], alpha=0.3)
-    nx.draw_networkx_labels(dag, pos, font_size=12, font_color="black")
-    plt.title(title, fontsize=16)
-    plt.show()

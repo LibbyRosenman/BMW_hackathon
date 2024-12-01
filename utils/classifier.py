@@ -1,7 +1,7 @@
 # predict.py
 import pandas as pd
-from sklearn.metrics import precision_recall_fscore_support
-from sklearn.model_selection import KFold
+from sklearn.metrics import precision_recall_fscore_support, make_scorer, f1_score
+from sklearn.model_selection import KFold, RandomizedSearchCV
 from sklearn.ensemble import RandomForestClassifier
 
 
@@ -49,13 +49,62 @@ def generate_predictions_and_save(model, test_data_cleaned, test_path):
     """
     # Generate predictions on the test data
     test_predictions = model.predict(test_data_cleaned)
+    test_predictions_mapped = ["OK" if pred == 1 else "NOK" for pred in test_predictions]
     # Load the original test data to add the predictions
     test_data = pd.read_csv(test_path)
     # Create a DataFrame with part_type_id and predictions
     result = pd.DataFrame({
         "part_type_id": test_data["part_type_id"],
-        "prediction": test_predictions
+        "prediction": test_predictions_mapped
     })
     # Save the predictions to a CSV file
-    result.to_csv("test_predictions.csv", index=False)
+    result.to_csv("test_predictions.csv", index=False, header=False)
     print("Predictions complete. Results saved to 'test_predictions.csv'.")
+
+
+def find_best_model(X_train, y_train, n_iter=10, cv=5):
+    """
+    Find the best Random Forest model using RandomizedSearchCV.
+
+    Parameters:
+    - X_train: Preprocessed training data (features).
+    - y_train: Training labels.
+    - n_iter: Number of parameter settings sampled (default: 20).
+    - cv: Number of cross-validation folds (default: 5).
+
+    Returns:
+    - best_rf: Best Random Forest model with tuned hyperparameters.
+    - best_params: Best hyperparameters found during tuning.
+    - duration: Time taken to run the search.
+    """
+    # Define the parameter grid
+    param_dist = {
+        'n_estimators': [50, 100, 200, 300],  # Number of trees in the forest
+        'max_depth': [None, 10, 20, 30],  # Depth of the trees
+        'min_samples_split': [2, 5, 10],  # Min samples required to split a node
+        'min_samples_leaf': [1, 2, 4],  # Min samples required at each leaf node
+        'max_features': ['sqrt', 'log2', None],  # Features to consider when looking for the best split
+        'class_weight': ['balanced', 'balanced_subsample']  # Handles imbalanced data
+    }
+    # Random Forest classifier
+    model = RandomForestClassifier(random_state=42)
+    # Define the scoring metric (e.g., F1-score for imbalanced datasets)
+    scorer = make_scorer(f1_score, average='binary')
+    # RandomizedSearchCV
+    random_search = RandomizedSearchCV(
+        estimator=model,
+        param_distributions=param_dist,
+        n_iter=n_iter,
+        scoring=scorer,
+        cv=cv,
+        verbose=2,
+        random_state=42,
+        n_jobs=-1
+    )
+    # Fit RandomizedSearchCV
+    random_search.fit(X_train, y_train)
+    # Best parameters and model
+    best_model = random_search.best_estimator_
+    best_params = random_search.best_params_
+    print(f"Best parameters found: {best_params}")    
+    return best_model, best_params
